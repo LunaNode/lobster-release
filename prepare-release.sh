@@ -10,6 +10,7 @@ cp src/github.com/LunaNode/lobster/NOTICE .
 cp src/github.com/LunaNode/lobster/README .
 cp src/github.com/LunaNode/lobster/schema.sql .
 cp src/github.com/LunaNode/lobster/lobster.example* .
+rm -r assets docs tmpl
 cp -r src/github.com/LunaNode/lobster/assets/ assets/
 cp -r src/github.com/LunaNode/lobster/docs/ docs/
 cp -r src/github.com/LunaNode/lobster/tmpl/ tmpl/
