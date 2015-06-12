@@ -2,6 +2,7 @@
 # compile lobster
 export GOPATH=`pwd`
 go build src/github.com/LunaNode/lobster/cmd/lobster.go
+mv lobster lobster_`uname -m`
 
 # copy files
 cp src/github.com/LunaNode/lobster/INSTALL .
