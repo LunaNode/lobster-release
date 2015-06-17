@@ -15,6 +15,7 @@ rm -r assets docs tmpl
 cp -r src/github.com/LunaNode/lobster/assets/ assets/
 cp -r src/github.com/LunaNode/lobster/docs/ docs/
 cp -r src/github.com/LunaNode/lobster/tmpl/ tmpl/
+cp -r src/github.com/LunaNode/lobster/language/ language/
 
 # fetch files
 rm -rf novnc
