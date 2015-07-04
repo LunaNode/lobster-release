@@ -28,7 +28,7 @@ var UI;
         rfb_state : 'loaded',
         settingsOpen : false,
         connSettingsOpen : false,
-        popupStatusOpen : false,
+        popupStatusTimeout: null,
         clipboardOpen: false,
         keyboardVisible: false,
         hideKeyboardTimeout: null,
@@ -38,6 +38,7 @@ var UI;
         ctrlOn: false,
         altOn: false,
         isTouchDevice: false,
+        rememberedClipSetting: null,
 
         // Setup rfb object, load settings from browser storage, then call
         // UI.init to setup the UI/menus
@@ -127,9 +128,26 @@ var UI;
             Util.addEvent(window, 'resize', function () {
                 UI.onresize();
                 UI.setViewClip();
-                UI.updateViewDragButton();
+                UI.updateViewDrag();
                 UI.setBarPosition();
             } );
+
+            var isSafari = (navigator.userAgent.indexOf('Safari') != -1 &&
+                            navigator.userAgent.indexOf('Chrome') == -1);
+
+            // Only show the button if fullscreen is properly supported
+            // * Safari doesn't support alphanumerical input while in fullscreen
+            if (!isSafari &&
+                (document.documentElement.requestFullscreen ||
+                 document.documentElement.mozRequestFullScreen ||
+                 document.documentElement.webkitRequestFullscreen ||
+                 document.body.msRequestFullscreen)) {
+                $D('fullscreenButton').style.display = "inline";
+                Util.addEvent(window, 'fullscreenchange', UI.updateFullscreenButton);
+                Util.addEvent(window, 'mozfullscreenchange', UI.updateFullscreenButton);
+                Util.addEvent(window, 'webkitfullscreenchange', UI.updateFullscreenButton);
+                Util.addEvent(window, 'msfullscreenchange', UI.updateFullscreenButton);
+            }
 
             Util.addEvent(window, 'load', UI.keyboardinputReset);
 
@@ -165,7 +183,7 @@ var UI;
                                   'onXvpInit': UI.updateXvpVisualState,
                                   'onClipboard': UI.clipReceive,
                                   'onFBUComplete': UI.FBUComplete,
-                                  'onFBResize': UI.updateViewDragButton,
+                                  'onFBResize': UI.updateViewDrag,
                                   'onDesktopName': UI.updateDocumentTitle});
                 return true;
             } catch (exc) {
@@ -176,7 +194,7 @@ var UI;
 
         addMouseHandlers: function() {
             // Setup interface handlers that can't be inline
-            $D("noVNC_view_drag_button").onclick = UI.setViewDrag;
+            $D("noVNC_view_drag_button").onclick = UI.toggleViewDrag;
             $D("noVNC_mouse_button0").onclick = function () { UI.setMouseButton(1); };
             $D("noVNC_mouse_button1").onclick = function () { UI.setMouseButton(2); };
             $D("noVNC_mouse_button2").onclick = function () { UI.setMouseButton(4); };
@@ -197,10 +215,11 @@ var UI;
             $D("xvpShutdownButton").onclick = UI.xvpShutdown;
             $D("xvpRebootButton").onclick = UI.xvpReboot;
             $D("xvpResetButton").onclick = UI.xvpReset;
-            $D("noVNC_status").onclick = UI.togglePopupStatusPanel;
-            $D("noVNC_popup_status_panel").onclick = UI.togglePopupStatusPanel;
+            $D("noVNC_status").onclick = UI.togglePopupStatus;
+            $D("noVNC_popup_status").onclick = UI.togglePopupStatus;
             $D("xvpButton").onclick = UI.toggleXvpPanel;
             $D("clipboardButton").onclick = UI.toggleClipboardPanel;
+            $D("fullscreenButton").onclick = UI.toggleFullscreen;
             $D("settingsButton").onclick = UI.toggleSettingsPanel;
             $D("connectButton").onclick = UI.toggleConnectPanel;
             $D("disconnectButton").onclick = UI.disconnect;
@@ -217,10 +236,7 @@ var UI;
 
             $D("noVNC_connect_button").onclick = UI.connect;
 
-            $D("noVNC_resize").onchange = function () {
-                var connected = UI.rfb && UI.rfb_state === 'normal';
-                UI.enableDisableClip(connected);
-            };
+            $D("noVNC_resize").onchange = UI.enableDisableViewClip;
         },
 
         onresize: function (callback) {
@@ -355,18 +371,27 @@ var UI;
         },
 
 
-        // Show the popup status panel
-        togglePopupStatusPanel: function() {
-            var psp = $D('noVNC_popup_status_panel');
-            if (UI.popupStatusOpen === true) {
-                psp.style.display = "none";
-                UI.popupStatusOpen = false;
-            } else {
-                psp.innerHTML = $D('noVNC_status').innerHTML;
+        // Show the popup status
+        togglePopupStatus: function(text) {
+            var psp = $D('noVNC_popup_status');
+
+            var closePopup = function() { psp.style.display = "none"; };
+
+            if (window.getComputedStyle(psp).display === 'none') {
+                if (typeof text === 'string') {
+                    psp.innerHTML = text;
+                } else {
+                    psp.innerHTML = $D('noVNC_status').innerHTML;
+                }
                 psp.style.display = "block";
                 psp.style.left = window.innerWidth/2 -
-                    parseInt(window.getComputedStyle(psp, false).width)/2 -30 + "px";
-                UI.popupStatusOpen = true;
+                    parseInt(window.getComputedStyle(psp).width)/2 -30 + "px";
+
+                // Show the popup for a maximum of 1.5 seconds
+                UI.popupStatusTimeout = setTimeout(function() { closePopup(); }, 1500);
+            } else {
+                clearTimeout(UI.popupStatusTimeout);
+                closePopup();
             }
         },
 
@@ -382,10 +407,6 @@ var UI;
             // Close connection settings if open
             if (UI.connSettingsOpen === true) {
                 UI.toggleConnectPanel();
-            }
-            // Close popup status panel if open
-            if (UI.popupStatusOpen === true) {
-                UI.togglePopupStatusPanel();
             }
             // Close clipboard panel if open
             if (UI.clipboardOpen === true) {
@@ -416,10 +437,6 @@ var UI;
             if (UI.connSettingsOpen === true) {
                 UI.toggleConnectPanel();
             }
-            // Close popup status panel if open
-            if (UI.popupStatusOpen === true) {
-                UI.togglePopupStatusPanel();
-            }
             // Close XVP panel if open
             if (UI.xvpOpen === true) {
                 UI.toggleXvpPanel();
@@ -436,6 +453,47 @@ var UI;
             }
         },
 
+        // Toggle fullscreen mode
+        toggleFullscreen: function() {
+            if (document.fullscreenElement || // alternative standard method
+                document.mozFullScreenElement || // currently working methods
+                document.webkitFullscreenElement ||
+                document.msFullscreenElement) {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.mozCancelFullScreen) {
+                    document.mozCancelFullScreen();
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) {
+                    document.msExitFullscreen();
+                }
+            } else {
+                if (document.documentElement.requestFullscreen) {
+                    document.documentElement.requestFullscreen();
+                } else if (document.documentElement.mozRequestFullScreen) {
+                    document.documentElement.mozRequestFullScreen();
+                } else if (document.documentElement.webkitRequestFullscreen) {
+                    document.documentElement.webkitRequestFullscreen(Element.ALLOW_KEYBOARD_INPUT);
+                } else if (document.body.msRequestFullscreen) {
+                    document.body.msRequestFullscreen();
+                }
+            }
+            UI.enableDisableViewClip();
+            UI.updateFullscreenButton();
+        },
+
+        updateFullscreenButton: function() {
+            if (document.fullscreenElement || // alternative standard method
+                document.mozFullScreenElement || // currently working methods
+                document.webkitFullscreenElement ||
+                document.msFullscreenElement ) {
+                $D('fullscreenButton').className = "noVNC_status_button_selected";
+            } else {
+                $D('fullscreenButton').className = "noVNC_status_button";
+            }
+        },
+
         // Show the connection settings panel/menu
         toggleConnectPanel: function() {
             // Close the description panel
@@ -449,10 +507,6 @@ var UI;
             // Close clipboard panel if open
             if (UI.clipboardOpen === true) {
                 UI.toggleClipboardPanel();
-            }
-            // Close popup status panel if open
-            if (UI.popupStatusOpen === true) {
-                UI.togglePopupStatusPanel();
             }
             // Close XVP panel if open
             if (UI.xvpOpen === true) {
@@ -518,10 +572,6 @@ var UI;
             if (UI.connSettingsOpen === true) {
                 UI.toggleConnectPanel();
             }
-            // Close popup status panel if open
-            if (UI.popupStatusOpen === true) {
-                UI.togglePopupStatusPanel();
-            }
             // Close XVP panel if open
             if (UI.xvpOpen === true) {
                 UI.toggleXvpPanel();
@@ -565,7 +615,7 @@ var UI;
             WebUtil.selectStylesheet(UI.getSetting('stylesheet'));
             WebUtil.init_logging(UI.getSetting('logging'));
             UI.setViewClip();
-            UI.setViewDrag(UI.rfb && UI.rfb.get_viewportDrag());
+            UI.updateViewDrag();
             //Util.Debug("<< settingsApply");
         },
 
@@ -671,7 +721,7 @@ var UI;
                 $D('noVNC_cursor').disabled = true;
             }
 
-            UI.enableDisableClip(connected);
+            UI.enableDisableViewClip();
             $D('noVNC_resize').disabled = connected;
             $D('noVNC_shared').disabled = connected;
             $D('noVNC_view_only').disabled = connected;
@@ -696,8 +746,7 @@ var UI;
 
             // State change disables viewport dragging.
             // It is enabled (toggled) by direct click on the button
-            UI.setViewDrag(false);
-            UI.updateViewDragButton();
+            UI.updateViewDrag(false);
 
             switch (UI.rfb_state) {
                 case 'fatal':
@@ -730,19 +779,6 @@ var UI;
                 // Close XVP panel if open
                 if (UI.xvpOpen === true) {
                     UI.toggleXvpPanel();
-                }
-            }
-        },
-
-        enableDisableClip: function (connected) {
-            var resizeElem = $D('noVNC_resize');
-            if (resizeElem.value === 'downscale' || resizeElem.value === 'scale') {
-                UI.forceSetting('clip', false);
-                $D('noVNC_clip').disabled = true;
-            } else {
-                $D('noVNC_clip').disabled = connected || UI.isTouchDevice;
-                if (UI.isTouchDevice) {
-                    UI.forceSetting('clip', true);
                 }
             }
         },
@@ -836,12 +872,13 @@ var UI;
             Util.Debug("<< UI.clipSend");
         },
 
-        // Enable/disable and configure viewport clipping
+        // Set and configure viewport clipping
         setViewClip: function(clip) {
             var display;
             if (UI.rfb) {
                 display = UI.rfb.get_display();
             } else {
+                UI.forceSetting('clip', clip);
                 return;
             }
 
@@ -859,6 +896,7 @@ var UI;
                 // Turn clipping off
                 UI.updateSetting('clip', false);
                 display.set_viewport(false);
+                // Disable max dimensions
                 display.set_maxWidth(0);
                 display.set_maxHeight(0);
                 display.viewportChangeSize();
@@ -886,43 +924,93 @@ var UI;
             }
         },
 
-        // Toggle/set/unset the viewport drag/move button
-        setViewDrag: function(drag) {
-            if (!UI.rfb) return;
+        // Handle special cases where clipping is forced on/off or locked
+        enableDisableViewClip: function () {
+            var resizeElem = $D('noVNC_resize');
+            var connected = UI.rfb && UI.rfb_state === 'normal';
 
-            if (typeof(drag) === "undefined" ||
-                typeof(drag) === "object") {
-                // If not specified, then toggle
-                drag = !UI.rfb.get_viewportDrag();
-            }
-            var vmb = $D('noVNC_view_drag_button');
-            if (drag) {
-                vmb.className = "noVNC_status_button_selected";
-                UI.rfb.set_viewportDrag(true);
+            if (resizeElem.value === 'downscale' || resizeElem.value === 'scale') {
+                // Disable clipping if we are scaling
+                UI.setViewClip(false);
+                $D('noVNC_clip').disabled = true;
+            } else if (document.msFullscreenElement) {
+                // The browser is IE and we are in fullscreen mode.
+                // - We need to force clipping while in fullscreen since
+                //   scrollbars doesn't work.
+                UI.togglePopupStatus("Forcing clipping mode since scrollbars aren't supported by IE in fullscreen");
+                UI.rememberedClipSetting = UI.getSetting('clip');
+                UI.setViewClip(true);
+                $D('noVNC_clip').disabled = true;
+            } else if (document.body.msRequestFullscreen && UI.rememberedClip !== null) {
+                // Restore view clip to what it was before fullscreen on IE
+                UI.setViewClip(UI.rememberedClipSetting);
+                $D('noVNC_clip').disabled = connected || UI.isTouchDevice;
             } else {
-                vmb.className = "noVNC_status_button";
-                UI.rfb.set_viewportDrag(false);
+                $D('noVNC_clip').disabled = connected || UI.isTouchDevice;
+                if (UI.isTouchDevice) {
+                    UI.setViewClip(true);
+                }
             }
         },
 
-        updateViewDragButton: function() {
+        // Update the viewport drag/move button
+        updateViewDrag: function(drag) {
+            if (!UI.rfb) return;
+
             var vmb = $D('noVNC_view_drag_button');
+
+            // Check if viewport drag is possible
             if (UI.rfb_state === 'normal' &&
                 UI.rfb.get_display().get_viewport() &&
                 UI.rfb.get_display().clippingDisplay()) {
-                // Enable the viewport drag button
+
+                // Show and enable the drag button
                 vmb.style.display = "inline";
                 vmb.disabled = false;
 
-            } else if (UI.rfb_state === 'normal' &&
-                       UI.isTouchDevice) {
-                // Disable the viewport drag button
-                vmb.style.display = "inline";
-                vmb.disabled = true;
-
             } else {
-                // Hide the viewport drag button
-                vmb.style.display = "none";
+                // The VNC content is the same size as
+                // or smaller than the display
+
+                if (UI.rfb.get_viewportDrag) {
+                    // Turn off viewport drag when it's
+                    // active since it can't be used here
+                    vmb.className = "noVNC_status_button";
+                    UI.rfb.set_viewportDrag(false);
+                }
+
+                // Disable or hide the drag button
+                if (UI.rfb_state === 'normal' && UI.isTouchDevice) {
+                    vmb.style.display = "inline";
+                    vmb.disabled = true;
+                } else {
+                    vmb.style.display = "none";
+                }
+                return;
+            }
+
+            if (typeof(drag) !== "undefined" &&
+                typeof(drag) !== "object") {
+                if (drag) {
+                    vmb.className = "noVNC_status_button_selected";
+                    UI.rfb.set_viewportDrag(true);
+                } else {
+                    vmb.className = "noVNC_status_button";
+                    UI.rfb.set_viewportDrag(false);
+                }
+            }
+        },
+
+        toggleViewDrag: function() {
+            if (!UI.rfb) return;
+
+            var vmb = $D('noVNC_view_drag_button');
+            if (UI.rfb.get_viewportDrag()) {
+                vmb.className = "noVNC_status_button";
+                UI.rfb.set_viewportDrag(false);
+            } else {
+                vmb.className = "noVNC_status_button_selected";
+                UI.rfb.set_viewportDrag(true);
             }
         },
 
