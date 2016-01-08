@@ -11,9 +11,8 @@ cp src/github.com/LunaNode/lobster/LICENSE .
 cp src/github.com/LunaNode/lobster/README .
 cp src/github.com/LunaNode/lobster/schema.sql .
 cp src/github.com/LunaNode/lobster/lobster.example* .
-rm -r assets docs tmpl language wssh
+rm -r assets tmpl language wssh
 cp -r src/github.com/LunaNode/lobster/assets/ assets/
-cp -r src/github.com/LunaNode/lobster/docs/ docs/
 cp -r src/github.com/LunaNode/lobster/tmpl/ tmpl/
 cp -r src/github.com/LunaNode/lobster/language/ language/
 mkdir wssh

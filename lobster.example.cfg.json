@@ -1,4 +1,13 @@
 {
+	"splash_routes":
+	{
+		"/": "index",
+		"/about": "about",
+		"/pricing": "pricing",
+		"/contact": "contact",
+		"/terms": "terms",
+		"/privacy": "privacy",
+	},
 	"vm":
 	[
 		{
@@ -34,6 +43,14 @@
 			"callback_secret": "random",
 			"api_key": "123",
 			"api_secret": "abcdef"
+		}
+	],
+	"module":
+	[
+		{
+			"type": "whmcs",
+			"ip": "127.0.0.1",
+			"secret": "random"
 		}
 	]
 }
