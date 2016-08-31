@@ -43,18 +43,23 @@ var RFB;
             ['HEXTILE',             0x05 ],
             ['RRE',                 0x02 ],
             ['RAW',                 0x00 ],
-            ['DesktopSize',         -223 ],
-            ['Cursor',              -239 ],
 
             // Psuedo-encoding settings
+
             //['JPEG_quality_lo',    -32 ],
             ['JPEG_quality_med',     -26 ],
             //['JPEG_quality_hi',    -23 ],
             //['compress_lo',       -255 ],
             ['compress_hi',         -247 ],
+
+            ['DesktopSize',         -223 ],
             ['last_rect',           -224 ],
+            ['Cursor',              -239 ],
+            ['ExtendedDesktopSize', -308 ],
             ['xvp',                 -309 ],
-            ['ExtendedDesktopSize', -308 ]
+            ['Fence',               -312 ],
+            ['ContinuousUpdates',   -313 ],
+            ['QEMUExtendedKeyEvent', -258 ]
         ];
 
         this._encHandlers = {};
@@ -65,9 +70,13 @@ var RFB;
         this._display = null;           // Display object
         this._keyboard = null;          // Keyboard input handler object
         this._mouse = null;             // Mouse input handler object
-        this._sendTimer = null;         // Send Queue check timer
         this._disconnTimer = null;      // disconnection timer
         this._msgTimer = null;          // queued handle_msg timer
+
+        this._supportsFence = false;
+
+        this._supportsContinuousUpdates = false;
+        this._enabledContinuousUpdates = false;
 
         // Frame buffer update state
         this._FBU = {
@@ -121,6 +130,9 @@ var RFB;
         this._viewportDragPos = {};
         this._viewportHasMoved = false;
 
+        // QEMU Extended Key Event support - default to false
+        this._qemuExtKeyEventSupported = false;
+
         // set the default value on user-facing properties
         Util.set_defaults(this, defaults, {
             'target': 'null',                       // VNC display rendering Canvas object
@@ -145,7 +157,7 @@ var RFB;
             'onFBUComplete': function () { },       // onFBUComplete(rfb, fbu): RFB FBU received and processed
             'onFBResize': function () { },          // onFBResize(rfb, width, height): frame buffer resized
             'onDesktopName': function () { },       // onDesktopName(rfb, name): desktop name received
-            'onXvpInit': function () { },           // onXvpInit(version): XVP extensions active for this connection
+            'onXvpInit': function () { }            // onXvpInit(version): XVP extensions active for this connection
         });
 
         // main setup
@@ -241,6 +253,7 @@ var RFB;
             }
 
             this._updateState('connect');
+            return true;
         },
 
         disconnect: function () {
@@ -253,7 +266,7 @@ var RFB;
         sendPassword: function (passwd) {
             this._rfb_password = passwd;
             this._rfb_state = 'Authentication';
-            setTimeout(this._init_msg.bind(this), 1);
+            setTimeout(this._init_msg.bind(this), 0);
         },
 
         sendCtrlAltDel: function () {
@@ -266,8 +279,7 @@ var RFB;
             RFB.messages.keyEvent(this._sock, XK_Delete, 0);
             RFB.messages.keyEvent(this._sock, XK_Alt_L, 0);
             RFB.messages.keyEvent(this._sock, XK_Control_L, 0);
-
-            this._sock.flush();
+            return true;
         },
 
         xvpOp: function (ver, op) {
@@ -301,38 +313,23 @@ var RFB;
                 RFB.messages.keyEvent(this._sock, code, 1);
                 RFB.messages.keyEvent(this._sock, code, 0);
             }
-
-            this._sock.flush();
+            return true;
         },
 
         clipboardPasteFrom: function (text) {
             if (this._rfb_state !== 'normal') { return; }
             RFB.messages.clientCutText(this._sock, text);
-            this._sock.flush();
         },
 
-        setDesktopSize: function (width, height) {
+        // Requests a change of remote desktop size. This message is an extension
+        // and may only be sent if we have received an ExtendedDesktopSize message
+        requestDesktopSize: function (width, height) {
             if (this._rfb_state !== "normal") { return; }
 
             if (this._supportsSetDesktopSize) {
-
-                var arr = [251];    // msg-type
-                arr.push8(0);       // padding
-                arr.push16(width);  // width
-                arr.push16(height); // height
-
-                arr.push8(1);       // number-of-screens
-                arr.push8(0);       // padding
-
-                // screen array
-                arr.push32(this._screen_id);    // id
-                arr.push16(0);                  // x-position
-                arr.push16(0);                  // y-position
-                arr.push16(width);              // width
-                arr.push16(height);             // height
-                arr.push32(this._screen_flags); // flags
-
-                this._sock.send(arr);
+                RFB.messages.setDesktopSize(this._sock, width, height,
+                                            this._screen_id, this._screen_flags);
+                this._sock.flush();
             }
         },
 
@@ -397,11 +394,6 @@ var RFB;
         },
 
         _cleanupSocket: function (state) {
-            if (this._sendTimer) {
-                clearInterval(this._sendTimer);
-                this._sendTimer = null;
-            }
-
             if (this._msgTimer) {
                 clearInterval(this._msgTimer);
                 this._msgTimer = null;
@@ -560,7 +552,7 @@ var RFB;
                             this._msgTimer = setTimeout(function () {
                                 this._msgTimer = null;
                                 this._handle_message();
-                            }.bind(this), 10);
+                            }.bind(this), 0);
                         } else {
                             Util.Debug("More data to process, existing timer");
                         }
@@ -572,10 +564,22 @@ var RFB;
             }
         },
 
-        _handleKeyPress: function (keysym, down) {
+        _handleKeyPress: function (keyevent) {
             if (this._view_only) { return; } // View only, skip keyboard, events
-            RFB.messages.keyEvent(this._sock, keysym, down);
-            this._sock.flush();
+
+            var down = (keyevent.type == 'keydown');
+            if (this._qemuExtKeyEventSupported) {
+                var scancode = XtScancode[keyevent.code];
+                if (scancode) {
+                    var keysym = keyevent.keysym;
+                    RFB.messages.QEMUExtendedKeyEvent(this._sock, keysym, down, scancode);
+                } else {
+                    Util.Error('Unable to find a xt scancode for code = ' + keyevent.code);
+                }
+            } else {
+                keysym = keyevent.keysym.keysym;
+                RFB.messages.keyEvent(this._sock, keysym, down);
+            }
         },
 
         _handleMouseButton: function (x, y, down, bmask) {
@@ -680,10 +684,6 @@ var RFB;
             if (this._rfb_version > this._rfb_max_version) {
                 this._rfb_version = this._rfb_max_version;
             }
-
-            // Send updates either at a rate of 1 update per 50ms, or
-            // whatever slower rate the network can handle
-            this._sendTimer = setInterval(this._sock.flush.bind(this._sock), 50);
 
             var cversion = "00" + parseInt(this._rfb_version, 10) +
                            ".00" + ((this._rfb_version * 10) % 10);
@@ -842,7 +842,7 @@ var RFB;
                 }
             }
 
-            this._fail("No supported sub-auth types!");
+            return this._fail("No supported sub-auth types!");
         },
 
         _negotiate_authentication: function () {
@@ -893,6 +893,8 @@ var RFB;
                     return false;
                 case 2:
                     return this._fail("Too many auth attempts");
+                default:
+                    return this._fail("Unknown SecurityResult");
             }
         },
 
@@ -999,17 +1001,17 @@ var RFB;
 
             RFB.messages.pixelFormat(this._sock, this._fb_Bpp, this._fb_depth, this._true_color);
             RFB.messages.clientEncodings(this._sock, this._encodings, this._local_cursor, this._true_color);
-            RFB.messages.fbUpdateRequests(this._sock, this._display.getCleanDirtyReset(), this._fb_width, this._fb_height);
+            RFB.messages.fbUpdateRequests(this._sock, false, this._display.getCleanDirtyReset(), this._fb_width, this._fb_height);
 
             this._timing.fbu_rt_start = (new Date()).getTime();
             this._timing.pixels = 0;
-            this._sock.flush();
 
             if (this._encrypt) {
                 this._updateState('normal', 'Connected (encrypted) to: ' + this._fb_name);
             } else {
                 this._updateState('normal', 'Connected (unencrypted) to: ' + this._fb_name);
             }
+            return true;
         },
 
         _init_msg: function () {
@@ -1033,6 +1035,9 @@ var RFB;
 
                 case 'ServerInitialisation':
                     return this._negotiate_server_init();
+
+                default:
+                    return this._fail("Unknown state: " + this._rfb_state);
             }
         },
 
@@ -1065,6 +1070,48 @@ var RFB;
 
             var text = this._sock.rQshiftStr(length);
             this._onClipboard(this, text);
+
+            return true;
+        },
+
+        _handle_server_fence_msg: function() {
+            if (this._sock.rQwait("ServerFence header", 8, 1)) { return false; }
+            this._sock.rQskipBytes(3); // Padding
+            var flags = this._sock.rQshift32();
+            var length = this._sock.rQshift8();
+
+            if (this._sock.rQwait("ServerFence payload", length, 9)) { return false; }
+
+            if (length > 64) {
+                Util.Warn("Bad payload length (" + length + ") in fence response");
+                length = 64;
+            }
+
+            var payload = this._sock.rQshiftStr(length);
+
+            this._supportsFence = true;
+
+            /*
+             * Fence flags
+             *
+             *  (1<<0)  - BlockBefore
+             *  (1<<1)  - BlockAfter
+             *  (1<<2)  - SyncNext
+             *  (1<<31) - Request
+             */
+
+            if (!(flags & (1<<31))) {
+                return this._fail("Unexpected fence response");
+            }
+
+            // Filter out unsupported flags
+            // FIXME: support syncNext
+            flags &= (1<<0) | (1<<1);
+
+            // BlockBefore and BlockAfter are automatically handled by
+            // the fact that we process each incoming message
+            // synchronuosly.
+            RFB.messages.clientFence(this._sock, flags, payload);
 
             return true;
         },
@@ -1105,8 +1152,10 @@ var RFB;
                 case 0:  // FramebufferUpdate
                     var ret = this._framebufferUpdate();
                     if (ret) {
-                        RFB.messages.fbUpdateRequests(this._sock, this._display.getCleanDirtyReset(), this._fb_width, this._fb_height);
-                        this._sock.flush();
+                        RFB.messages.fbUpdateRequests(this._sock,
+                                                      this._enabledContinuousUpdates,
+                                                      this._display.getCleanDirtyReset(),
+                                                      this._fb_width, this._fb_height);
                     }
                     return ret;
 
@@ -1120,6 +1169,23 @@ var RFB;
 
                 case 3:  // ServerCutText
                     return this._handle_server_cut_text();
+
+                case 150: // EndOfContinuousUpdates
+                    var first = !(this._supportsContinuousUpdates);
+                    this._supportsContinuousUpdates = true;
+                    this._enabledContinuousUpdates = false;
+                    if (first) {
+                        this._enabledContinuousUpdates = true;
+                        this._updateContinuousUpdates();
+                        Util.Info("Enabling continuous updates.");
+                    } else {
+                        // FIXME: We need to send a framebufferupdaterequest here
+                        // if we add support for turning off continuous updates
+                    }
+                    return true;
+
+                case 248: // ServerFence
+                    return this._handle_server_fence_msg();
 
                 case 250:  // XVP
                     return this._handle_xvp_msg();
@@ -1178,14 +1244,7 @@ var RFB;
 
                 this._timing.last_fbu = (new Date()).getTime();
 
-                var handler = this._encHandlers[this._FBU.encoding];
-                try {
-                    //ret = this._encHandlers[this._FBU.encoding]();
-                    ret = handler();
-                } catch (ex)  {
-                    console.log("missed " + this._FBU.encoding + ": " + handler);
-                    ret = this._encHandlers[this._FBU.encoding]();
-                }
+                ret = this._encHandlers[this._FBU.encoding]();
 
                 now = (new Date()).getTime();
                 this._timing.cur_fbu += (now - this._timing.last_fbu);
@@ -1232,6 +1291,13 @@ var RFB;
 
             return true;  // We finished this FBU
         },
+
+        _updateContinuousUpdates: function() {
+            if (!this._enabledContinuousUpdates) { return; }
+
+            RFB.messages.enableContinuousUpdates(this._sock, true, 0, 0,
+                                                 this._fb_width, this._fb_height);
+        }
     };
 
     Util.make_properties(RFB, [
@@ -1257,7 +1323,7 @@ var RFB;
         ['onFBUComplete', 'rw', 'func'],        // onFBUComplete(rfb, fbu): RFB FBU received and processed
         ['onFBResize', 'rw', 'func'],           // onFBResize(rfb, width, height): frame buffer resized
         ['onDesktopName', 'rw', 'func'],        // onDesktopName(rfb, name): desktop name received
-        ['onXvpInit', 'rw', 'func'],            // onXvpInit(version): XVP extensions active for this connection
+        ['onXvpInit', 'rw', 'func']             // onXvpInit(version): XVP extensions active for this connection
     ]);
 
     RFB.prototype.set_local_cursor = function (cursor) {
@@ -1296,6 +1362,43 @@ var RFB;
             buff[offset + 7] = keysym;
 
             sock._sQlen += 8;
+            sock.flush();
+        },
+
+        QEMUExtendedKeyEvent: function (sock, keysym, down, keycode) {
+            function getRFBkeycode(xt_scancode) {
+                var upperByte = (keycode >> 8);
+                var lowerByte = (keycode & 0x00ff);
+                if (upperByte === 0xe0 && lowerByte < 0x7f) {
+                    lowerByte = lowerByte | 0x80;
+                    return lowerByte;
+                }
+                return xt_scancode
+            }
+
+            var buff = sock._sQ;
+            var offset = sock._sQlen;
+
+            buff[offset] = 255; // msg-type
+            buff[offset + 1] = 0; // sub msg-type
+
+            buff[offset + 2] = (down >> 8);
+            buff[offset + 3] = down;
+
+            buff[offset + 4] = (keysym >> 24);
+            buff[offset + 5] = (keysym >> 16);
+            buff[offset + 6] = (keysym >> 8);
+            buff[offset + 7] = keysym;
+
+            var RFBkeycode = getRFBkeycode(keycode)
+
+            buff[offset + 8] = (RFBkeycode >> 24);
+            buff[offset + 9] = (RFBkeycode >> 16);
+            buff[offset + 10] = (RFBkeycode >> 8);
+            buff[offset + 11] = RFBkeycode;
+
+            sock._sQlen += 12;
+            sock.flush();
         },
 
         pointerEvent: function (sock, x, y, mask) {
@@ -1313,6 +1416,7 @@ var RFB;
             buff[offset + 5] = y;
 
             sock._sQlen += 6;
+            sock.flush();
         },
 
         // TODO(directxman12): make this unicode compatible?
@@ -1338,6 +1442,90 @@ var RFB;
             }
 
             sock._sQlen += 8 + n;
+            sock.flush();
+        },
+
+        setDesktopSize: function (sock, width, height, id, flags) {
+            var buff = sock._sQ;
+            var offset = sock._sQlen;
+
+            buff[offset] = 251;              // msg-type
+            buff[offset + 1] = 0;            // padding
+            buff[offset + 2] = width >> 8;   // width
+            buff[offset + 3] = width;
+            buff[offset + 4] = height >> 8;  // height
+            buff[offset + 5] = height;
+
+            buff[offset + 6] = 1;            // number-of-screens
+            buff[offset + 7] = 0;            // padding
+
+            // screen array
+            buff[offset + 8] = id >> 24;     // id
+            buff[offset + 9] = id >> 16;
+            buff[offset + 10] = id >> 8;
+            buff[offset + 11] = id;
+            buff[offset + 12] = 0;           // x-position
+            buff[offset + 13] = 0;
+            buff[offset + 14] = 0;           // y-position
+            buff[offset + 15] = 0;
+            buff[offset + 16] = width >> 8;  // width
+            buff[offset + 17] = width;
+            buff[offset + 18] = height >> 8; // height
+            buff[offset + 19] = height;
+            buff[offset + 20] = flags >> 24; // flags
+            buff[offset + 21] = flags >> 16;
+            buff[offset + 22] = flags >> 8;
+            buff[offset + 23] = flags;
+
+            sock._sQlen += 24;
+            sock.flush();
+        },
+
+        clientFence: function (sock, flags, payload) {
+            var buff = sock._sQ;
+            var offset = sock._sQlen;
+
+            buff[offset] = 248; // msg-type
+
+            buff[offset + 1] = 0; // padding
+            buff[offset + 2] = 0; // padding
+            buff[offset + 3] = 0; // padding
+
+            buff[offset + 4] = flags >> 24; // flags
+            buff[offset + 5] = flags >> 16;
+            buff[offset + 6] = flags >> 8;
+            buff[offset + 7] = flags;
+
+            var n = payload.length;
+
+            buff[offset + 8] = n; // length
+
+            for (var i = 0; i < n; i++) {
+                buff[offset + 9 + i] = payload.charCodeAt(i);
+            }
+
+            sock._sQlen += 9 + n;
+            sock.flush();
+        },
+
+        enableContinuousUpdates: function (sock, enable, x, y, width, height) {
+            var buff = sock._sQ;
+            var offset = sock._sQlen;
+
+            buff[offset] = 150;             // msg-type
+            buff[offset + 1] = enable;      // enable-flag
+
+            buff[offset + 2] = x >> 8;      // x
+            buff[offset + 3] = x;
+            buff[offset + 4] = y >> 8;      // y
+            buff[offset + 5] = y;
+            buff[offset + 6] = width >> 8;  // width
+            buff[offset + 7] = width;
+            buff[offset + 8] = height >> 8; // height
+            buff[offset + 9] = height;
+
+            sock._sQlen += 10;
+            sock.flush();
         },
 
         pixelFormat: function (sock, bpp, depth, true_color) {
@@ -1373,6 +1561,7 @@ var RFB;
             buff[offset + 19] = 0;   // padding
 
             sock._sQlen += 20;
+            sock.flush();
         },
 
         clientEncodings: function (sock, encodings, local_cursor, true_color) {
@@ -1407,14 +1596,15 @@ var RFB;
             buff[offset + 3] = cnt;
 
             sock._sQlen += j - offset;
+            sock.flush();
         },
 
-        fbUpdateRequests: function (sock, cleanDirty, fb_width, fb_height) {
+        fbUpdateRequests: function (sock, onlyNonInc, cleanDirty, fb_width, fb_height) {
             var offsetIncrement = 0;
 
             var cb = cleanDirty.cleanBox;
             var w, h;
-            if (cb.w > 0 && cb.h > 0) {
+            if (!onlyNonInc && (cb.w > 0 && cb.h > 0)) {
                 w = typeof cb.w === "undefined" ? fb_width : cb.w;
                 h = typeof cb.h === "undefined" ? fb_height : cb.h;
                 // Request incremental for clean box
@@ -1453,6 +1643,7 @@ var RFB;
             buff[offset + 9] = h & 0xFF;
 
             sock._sQlen += 10;
+            sock.flush();
         }
     };
 
@@ -1707,7 +1898,6 @@ var RFB;
                 for (var i = 0; i < 4; i++) {
                     if ((resetStreams >> i) & 1) {
                         this._FBU.zlibs[i].reset();
-                        console.debug('RESET!');
                         Util.Info("Reset zlib stream " + i);
                     }
                 }
@@ -1989,8 +2179,7 @@ var RFB;
                     } else {
                         // Filter 0, Copy could be valid here, but servers don't send it as an explicit filter
                         // Filter 2, Gradient is valid but not use if jpeg is enabled
-                        // TODO(directxman12): why aren't we just calling '_fail' here
-                        throw new Error("Unsupported tight subencoding received, filter: " + filterId);
+                        this._fail("Unsupported tight subencoding received, filter: " + filterId);
                     }
                     break;
                 case "copy":
@@ -2020,6 +2209,7 @@ var RFB;
             this._display.resize(this._fb_width, this._fb_height);
             this._onFBResize(this, this._fb_width, this._fb_height);
             this._timing.fbu_rt_start = (new Date()).getTime();
+            this._updateContinuousUpdates();
 
             this._FBU.bytes = 0;
             this._FBU.rects -= 1;
@@ -2122,6 +2312,16 @@ var RFB;
 
         compress_lo: function () {
             Util.Error("Server sent compress level pseudo-encoding");
-        }
+        },
+
+        QEMUExtendedKeyEvent: function () {
+            this._FBU.rects--;
+
+            var keyboardEvent = document.createEvent("keyboardEvent");
+            if (keyboardEvent.code !== undefined) {
+                this._qemuExtKeyEventSupported = true;
+                this._keyboard.setQEMUVNCKeyboardHandler();
+            }
+        },
     };
 })();
